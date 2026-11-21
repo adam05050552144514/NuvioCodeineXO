@@ -1,0 +1,73 @@
+name: Build Linux AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/linux-appimage.yml
+
+permissions:
+  contents: read
+
+jobs:
+  linux_appimage:
+    name: Linux x64 - AppImage
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    env:
+      LOCAL_PROPERTIES_BASE64: ${{ secrets.LOCAL_PROPERTIES_BASE64 }}
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        run: bash ./scripts/linux/install-desktop-build-dependencies.sh zsync
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Configure desktop runtime
+        shell: bash
+        run: |
+          if [[ -z "${LOCAL_PROPERTIES_BASE64:-}" ]]; then
+            echo "LOCAL_PROPERTIES_BASE64 secret is not set; runtime config will be empty." >&2
+            printf 'NUVIO_SUPABASE_URL=\nNUVIO_SUPABASE_ANON_KEY=\nTMDB_API_KEY=\n' > local.properties
+          else
+            printf '%s' "${LOCAL_PROPERTIES_BASE64}" | base64 --decode > local.properties
+            sed -i -E '/^[[:space:]]*sdk\.dir[[:space:]]*=/d' local.properties
+          fi
+
+      - name: Build AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool="${RUNNER_TEMP}/appimagetool-x86_64.AppImage"
+          curl -fsSL -o "${tool}" \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+          sha="$(sha256sum "${tool}" | awk '{print $1}')"
+          if [[ "${sha}" != "${APPIMAGETOOL_SHA256}" ]]; then
+            echo "appimagetool checksum mismatch" >&2
+            exit 1
+          fi
+          chmod +x "${tool}"
+          export APPIMAGETOOL="${tool}"
+          ./gradlew :composeApp:packageReleaseAppImage \
+            -Pcompose.desktop.packaging.checkJdkVendor=false \
+            --no-configuration-cache --no-daemon --stacktrace
+          find composeApp/build/compose -name "*.AppImage" -type f | sort
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: nuvio-linux-appimage
+          path: composeApp/build/compose/release-appimages/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
